@@ -4333,3 +4333,87 @@ describe("foreground-tool streaming on ED3-risk terminals", () => {
 		}
 	});
 });
+
+describe("bottomAlignShortFrame", () => {
+	let savedTerminalEnv: Record<string, string | undefined> = {};
+
+	beforeEach(() => {
+		for (const key of ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"]) {
+			savedTerminalEnv[key] = Bun.env[key];
+			delete Bun.env[key];
+		}
+	});
+
+	afterEach(() => {
+		for (const key in savedTerminalEnv) {
+			const value = savedTerminalEnv[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		savedTerminalEnv = {};
+		vi.restoreAllMocks();
+	});
+
+	it("bottom-aligns short frames when opted in", async () => {
+		const term = new VirtualTerminal(20, 6, 100);
+		const tui = new TUI(term, undefined, { bottomAlignShortFrame: true });
+		tui.addChild(new MutableLinesComponent(["message", "input"]));
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(visible(term)).toEqual(["", "", "", "", "message", "input"]);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("keeps short frames top-aligned by default", async () => {
+		const term = new VirtualTerminal(20, 6, 100);
+		const tui = new TUI(term);
+		tui.addChild(new MutableLinesComponent(["message", "input"]));
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(visible(term)).toEqual(["message", "input", "", "", "", ""]);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("leaves overflow frames tail-aligned when opted in", async () => {
+		const term = new VirtualTerminal(20, 4, 100);
+		const tui = new TUI(term, undefined, { bottomAlignShortFrame: true });
+		tui.addChild(new MutableLinesComponent(["a", "b", "c", "d", "e", "f"]));
+
+		try {
+			tui.start();
+			await settle(term);
+			// Overflow tail-follows exactly as the default would: the bottom 4 rows.
+			expect(visible(term)).toEqual(["c", "d", "e", "f"]);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("pins the cursor marker to the bottom-aligned row", async () => {
+		const term = new VirtualTerminal(20, 6, 100);
+		const tui = new TUI(term, undefined, { bottomAlignShortFrame: true });
+		tui.addChild(new MutableLinesComponent([`before${CURSOR_MARKER}cursor`]));
+
+		try {
+			tui.start();
+			await settle(term);
+			// The content row sits on the last viewport row; a hardware cursor is
+			// not requested here, but the marker must resolve to the bottom row.
+			expect(visible(term)).toEqual(["", "", "", "", "", "beforecursor"]);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+});

@@ -100,6 +100,14 @@ export interface RenderScheduler {
 
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
+	/**
+	 * Pin a frame shorter than the viewport to the terminal bottom by
+	 * prepending blank rows above the content. The default (`false`) keeps the
+	 * long-standing top-aligned geometry (blank rows fall below the content).
+	 * Overflow behavior is unaffected: a frame taller than the viewport still
+	 * tail-follows and commits to native scrollback as usual.
+	 */
+	bottomAlignShortFrame?: boolean;
 }
 
 export interface TUIStartOptions {
@@ -1134,12 +1142,21 @@ export class TUI extends Container {
 		hidden: boolean;
 	}[] = [];
 
+	// When bottomAlignShortFrame is enabled, the count of blank rows prepended
+	// above the composed frame on the most recent frame. A change in this count
+	// shifts every row-indexed render artifact (cursor markers, live-region
+	// seam, prepared-frame cache), so the helper resets them before the window
+	// and commit math observes the padded frame.
+	#bottomAlignShortFrame = false;
+	#shortFrameTopPaddingRows = 0;
+
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, options?: TUIOptions) {
 		super();
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
+		this.#bottomAlignShortFrame = options?.bottomAlignShortFrame === true;
 	}
 
 	override render(width: number): readonly string[] {
@@ -2582,14 +2599,40 @@ export class TUI extends Container {
 		// render recomposes from scratch, so consuming state here would
 		// misclassify a pending resize as an ordinary diff and corrupt the paint.
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
-		// Cursor markers were stripped at compose time (they are internal
-		// sentinels and must never reach the terminal, the committed prefix, or
-		// the audit); the visible marker is chosen after the window top is
-		// known. Ascending by frame row.
-		const cursorMarkers = this.#frameCursorMarkers;
-		const liveRegionStart = this.#nativeScrollbackLiveRegionStart;
-		const commitSafeEnd = this.#nativeScrollbackCommitSafeEnd;
-		const snapshotSafeEnd = this.#nativeScrollbackSnapshotSafeEnd;
+		// Bottom-align a short frame: prepend blank rows so the content sits at
+		// the viewport bottom (editor pinned to the last terminal row) instead of
+		// the top. The padded rows become part of the authoritative frame, so every
+		// downstream computation — window slice, cursor parking, commit/audit
+		// math — observes a full-height frame and needs no special-casing in the
+		// emitters. Persistent caches (#composedFrame, #preparedFrame,
+		// #frameCursorMarkers, the native-scrollback seam) stay aligned to the
+		// UNPADDED composed frame, so their row indices are shifted by the padding
+		// amount only in the local reads below — never mutated in place (render()
+		// does not re-ingest stable markers, so in-place mutation would accumulate
+		// a double shift on every stable frame).
+		rawFrame = this.#alignShortFrameToBottom(rawFrame, height);
+		const bottomPaddingRows = this.#shortFrameTopPaddingRows;
+		const cursorMarkers =
+			bottomPaddingRows > 0
+				? this.#frameCursorMarkers.map(marker => ({ row: marker.row + bottomPaddingRows, col: marker.col }))
+				: this.#frameCursorMarkers;
+		// The native-scrollback seam is indexed against the UNPADDED composed
+		// frame; the padded frame prepends blank rows, so shift the boundaries
+		// into padded-frame coordinates so byteStableBoundary/durableBoundary
+		// (derived below) observe a consistent full-height frame. The blank
+		// padding rows are byte-stable, so they belong inside the stable prefix.
+		const liveRegionStart =
+			this.#nativeScrollbackLiveRegionStart === undefined || bottomPaddingRows === 0
+				? this.#nativeScrollbackLiveRegionStart
+				: this.#nativeScrollbackLiveRegionStart + bottomPaddingRows;
+		const commitSafeEnd =
+			this.#nativeScrollbackCommitSafeEnd === undefined || bottomPaddingRows === 0
+				? this.#nativeScrollbackCommitSafeEnd
+				: this.#nativeScrollbackCommitSafeEnd + bottomPaddingRows;
+		const snapshotSafeEnd =
+			this.#nativeScrollbackSnapshotSafeEnd === undefined || bottomPaddingRows === 0
+				? this.#nativeScrollbackSnapshotSafeEnd
+				: this.#nativeScrollbackSnapshotSafeEnd + bottomPaddingRows;
 
 		// Commit boundaries (also used by the window/commit math in section 3),
 		// hoisted above the audit gate because the resync needs byteStableBoundary
@@ -2899,6 +2942,37 @@ export class TUI extends Container {
 				: Math.min(preDurableRows, committed);
 		this.#committedPrefixAuditRows = auditRows;
 		this.#committedPrefixDurableRows = Math.max(auditRows, durableRows);
+	}
+
+	/**
+	 * Prepend blank rows above a frame shorter than the viewport so the content
+	 * pins to the terminal bottom (opt-in via `bottomAlignShortFrame`). A frame
+	 * that overflows or exactly fills the viewport is returned unchanged, so the
+	 * tail-following and native-scrollback paths are untouched.
+	 *
+	 * Only the authoritative `rawFrame` is padded; persistent caches
+	 * (`#composedFrame`, `#preparedFrame`, `#frameCursorMarkers`, the seam
+	 * fields) stay aligned to the unpadded composed frame, and `#doRender`
+	 * shifts their row indices into padded-frame coordinates when it reads them.
+	 * A short frame always has `windowTop = 0` and `chunkTo = 0`, so the padding
+	 * rows never enter the committed prefix or native scrollback — they are a
+	 * purely visual top gap. When the padding count changes, the prepared-frame
+	 * and stable-prefix caches are reset so no row-indexed state is reused
+	 * across a shifted frame.
+	 */
+	#alignShortFrameToBottom(frame: readonly string[], height: number): readonly string[] {
+		const paddingRows =
+			this.#bottomAlignShortFrame && height > 0 && frame.length < height ? height - frame.length : 0;
+		if (paddingRows !== this.#shortFrameTopPaddingRows) {
+			this.#shortFrameTopPaddingRows = paddingRows;
+			this.#preparedValidRows = 0;
+			this.#renderStablePrefixRows = 0;
+		}
+		if (paddingRows === 0) return frame;
+		const padded: string[] = new Array(frame.length + paddingRows);
+		for (let i = 0; i < paddingRows; i++) padded[i] = "";
+		for (let i = 0; i < frame.length; i++) padded[paddingRows + i] = frame[i]!;
+		return padded;
 	}
 
 	/**
@@ -3310,11 +3384,14 @@ export class TUI extends Container {
 	 * `height` rows of the would-be full frame, collected bottom-up across root
 	 * children. {@link ViewportTailProvider}s (the transcript) yield only their
 	 * tail; the small live-region children below render in full — so every child
-	 * entirely above the fold is skipped. A frame shorter than the viewport is
-	 * top-aligned with blank rows below, matching the full-paint window geometry
-	 * (windowTop = max(0, frameLength - height)). Cursor markers are stripped
-	 * (the drag hides the hardware cursor) and rows are width-fitted via the
-	 * stateless preparer, so no persistent prepared-frame cache is touched.
+	 * entirely above the fold is skipped. Default callers top-align a frame
+	 * shorter than the viewport (blank rows below), matching the full-paint
+	 * window geometry (windowTop = max(0, frameLength - height)); callers with
+	 * `bottomAlignShortFrame` bottom-align it instead (blank rows above) so a
+	 * resize drag stays visually consistent with the settled frame. Cursor
+	 * markers are stripped (the drag hides the hardware cursor) and rows are
+	 * width-fitted via the stateless preparer, so no persistent prepared-frame
+	 * cache is touched.
 	 */
 	#composeResizeViewport(width: number, height: number): { window: readonly string[]; contentRows: number } {
 		const tail: string[] = []; // bottom-first
@@ -3328,15 +3405,26 @@ export class TUI extends Container {
 			}
 		}
 		const count = tail.length;
+		const bottomAligned = this.#bottomAlignShortFrame && count < height;
+		const topPad = bottomAligned ? height - count : 0;
 		const window: string[] = new Array(height);
 		for (let screenRow = 0; screenRow < height; screenRow++) {
 			// `tail` holds the bottom `count` frame rows, bottom-first. They fill
-			// the viewport when the frame overflows it and sit at the top (blanks
-			// below) when it underflows.
-			window[screenRow] = screenRow < count ? tail[count - 1 - screenRow]! : "";
+			// the viewport when the frame overflows it; when it underflows they
+			// sit at the top (blanks below) by default, or at the bottom (blanks
+			// above) when bottom-aligned, mirroring the settled frame geometry.
+			window[screenRow] = bottomAligned
+				? screenRow >= topPad
+					? tail[count - 1 - (screenRow - topPad)]!
+					: ""
+				: screenRow < count
+					? tail[count - 1 - screenRow]!
+					: "";
 		}
 		this.#extractCursorMarkers(window);
-		return { window: this.#prepareLinesArray(window, width), contentRows: count };
+		// Bottom-aligned fills the whole viewport; report contentRows = height so
+		// the emitter parks the cursor at the content bottom rather than above it.
+		return { window: this.#prepareLinesArray(window, width), contentRows: bottomAligned ? height : count };
 	}
 
 	/**
