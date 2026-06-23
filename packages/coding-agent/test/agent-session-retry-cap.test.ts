@@ -1009,4 +1009,74 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after default 502 retry budget" });
 	});
+
+	it("auto-retries 429 with locale-specific error message via errorStatus", async () => {
+		// Contract: when a provider returns HTTP 429 with a non-English error body
+		// (e.g. Z.AI/Zhipu GLM: {"error":{"code":"1305","message":"该模型当前访问量过大，请您稍后再试"}}),
+		// the session retry classifier MUST still recognize it as transient via the
+		// structured `errorStatus` field — not rely on English keyword matching
+		// against the message text alone.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel();
+		let attempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				attempts += 1;
+				mock.push(
+					attempts <= 2
+						? {
+								throw: "该模型当前访问量过大，请您稍后再试",
+								errorStatus: 429,
+							}
+						: { content: ["recovered after transient 429"] },
+				);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger locale-specific 429");
+		await session.waitForIdle();
+
+		// Two failures then success: the session retried and recovered.
+		expect(attempts).toBe(3);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 2 });
+		const last = lastAssistant(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered after transient 429" });
+	});
 });

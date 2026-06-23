@@ -93,6 +93,8 @@ export interface MockResponse {
 	responseId?: string;
 	/** If set, the stream emits a terminal error event instead of completing. */
 	throw?: string | Error;
+	/** HTTP status code to set on the error message (e.g. 429 for rate limit). */
+	errorStatus?: number;
 	/** Delay before any event is emitted. Honors the call's AbortSignal. */
 	delayMs?: number;
 	/**
@@ -352,7 +354,7 @@ async function runMock(
 				: response.throw instanceof Error
 					? response.throw.message
 					: String(response.throw);
-		emitTerminalError(stream, model, startedAt, perfStart, "error", message);
+		emitTerminalError(stream, model, startedAt, perfStart, "error", message, response.errorStatus);
 		return;
 	}
 
@@ -465,6 +467,7 @@ function emitTerminalError(
 	perfStart: number,
 	reason: "aborted" | "error",
 	message: string,
+	errorStatus?: number,
 ): void {
 	const failure: AssistantMessage = {
 		role: "assistant",
@@ -477,6 +480,7 @@ function emitTerminalError(
 		errorMessage: message,
 		timestamp: startedAt,
 		duration: performance.now() - perfStart,
+		...(errorStatus !== undefined ? { errorStatus } : {}),
 	};
 	stream.push({ type: "start", partial: failure });
 	stream.push({ type: "error", reason, error: failure });

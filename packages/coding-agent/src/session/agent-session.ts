@@ -11539,7 +11539,6 @@ export class AgentSession {
 								lastError = error;
 								break;
 							}
-
 							const retryAfterMs = this.#parseRetryAfterMsFromError(message);
 							const shouldRetry =
 								retrySettings.enabled &&

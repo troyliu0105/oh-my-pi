@@ -147,6 +147,14 @@ export function isOpaqueStatusBody(message: string): boolean {
 	const cleaned = message
 		.replace(/\b429\b/g, "")
 		.replace(/\b(?:http|https|status|error|code|response|message)\b/gi, "");
+	// A locale-specific body (CJK, Cyrillic, Arabic, etc.) carries semantic
+	// content even when it lacks Latin keywords — the original English-only
+	// `/[a-z\d]{3,}/` check misclassified these as opaque, wrongly forcing a
+	// 429 into the account-rotation (UsageLimit) path. Any non-ASCII script
+	// run makes the body informative.
+	if (/[\p{Script=Cyrillic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Thai}]/u.test(cleaned)) {
+		return false;
+	}
 	return !/[a-z\d]{3,}/i.test(cleaned);
 }
 

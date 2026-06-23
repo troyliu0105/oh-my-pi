@@ -323,6 +323,13 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 	if (kinds !== 0) return create(kinds);
 	const fallbackStatus = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
 	if (fallbackStatus === 401 || fallbackStatus === 403) return create(Flag.AuthFailed);
+	// A retryable bare HTTP status (408/429/5xx) with no text-derived flag — e.g.
+	// a locale-specific rate-limit message whose keywords don't match the English
+	// patterns above (Z.AI/Zhipu GLM returns Chinese 429 text). Treat the status
+	// itself as transient so callers relying on `errorStatus` can still retry.
+	if (fallbackStatus === 408 || fallbackStatus === 429 || (fallbackStatus ?? 0) >= 500) {
+		return create(Flag.Transient);
+	}
 	return fallbackStatus ?? 0;
 }
 
