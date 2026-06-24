@@ -2746,18 +2746,19 @@ export class TUI extends Container {
 			frameLength <= this.#committedRows ||
 			(committedRowsResynced &&
 				frameLength - this.#committedRows < height &&
-				cursorMarkers.some(marker => marker.row >= this.#committedRows))
+				cursorMarkers.some(marker => marker.row >= this.#committedRows)) ||
+			(bottomPaddingRows > 0 && this.#committedRows > 0)
 		) {
-			// Either the frame shrank into the committed prefix, or a
-			// committed-prefix resync left a focused cursor tail shorter than the
-			// viewport. The latter happens when a streaming/live block had an
-			// append-only prefix committed, then collapses on abort/finalize:
-			// the audit re-anchors #committedRows at the first divergent row, but
-			// flooring windowTop there would pin the editor near the top and
-			// leave blank rows underneath. Re-show the frame tail instead. The
-			// stale committed copy stays in native history; duplicating a few rows
-			// is preferable to a live editor gap and matches the existing
-			// "duplication, never loss" resync contract.
+			// Either the frame shrank into the committed prefix, a committed-prefix
+			// resync left a focused cursor tail shorter than the viewport, or the
+			// frame is now short enough to bottom-align with blank rows above it.
+			// The first two cases are existing duplication-never-loss paths. The
+			// bottom-aligned short-frame case is the same geometric problem under a
+			// different trigger: flooring windowTop at the old committed boundary
+			// would pin the input near the top and leave a blank gap underneath.
+			// Re-show the full frame tail instead; any stale committed copy stays in
+			// native history, and a few duplicated rows are preferable to a live
+			// editor gap during tmux / Warp-style in-place resize paths.
 			windowTop = Math.max(0, frameLength - height);
 			chunkTo = windowTop;
 			committedPrefixResliced = true;
