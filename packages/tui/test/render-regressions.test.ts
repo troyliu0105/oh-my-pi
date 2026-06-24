@@ -4400,6 +4400,60 @@ describe("bottomAlignShortFrame", () => {
 		}
 	});
 
+	it("tmux height grows re-show a previously overflowing short frame at the bottom", async () => {
+		await withEnvPatch({ TMUX: "1", STY: undefined, ZELLIJ: undefined }, async () => {
+			const term = new VirtualTerminal(20, 4, 100);
+			const tui = new TUI(term, undefined, { bottomAlignShortFrame: true });
+			const lines = ["row-0", "row-1", "row-2", "row-3", "row-4", "input"];
+			tui.addChild(new MutableLinesComponent(lines));
+
+			try {
+				tui.start();
+				await settle(term);
+				expect(visible(term)).toEqual(["row-2", "row-3", "row-4", "input"]);
+
+				// Height 4 -> 8 makes the same 6 logical rows shorter than the viewport.
+				// tmux uses the in-place geometry path: the old committed boundary must
+				// not floor windowTop, or the short frame reappears at the top with a
+				// blank gap underneath instead of blanks above it.
+				term.resize(20, 8);
+				await settleResize(term);
+				expect(visible(term)).toEqual(["", "", "row-0", "row-1", "row-2", "row-3", "row-4", "input"]);
+			} finally {
+				tui.stop();
+				await term.flush();
+			}
+		});
+	});
+
+	it("Warp-style in-place resizes keep a newly short frame bottom-aligned", async () => {
+		await withEnvPatch(
+			{ TERM_PROGRAM: "WarpTerminal", TMUX: undefined, STY: undefined, ZELLIJ: undefined },
+			async () => {
+				const term = new VirtualTerminal(20, 4, 100);
+				const tui = new TUI(term, undefined, { bottomAlignShortFrame: true });
+				const lines = ["row-0", "row-1", "row-2", "row-3", "row-4", "input"];
+				tui.addChild(new MutableLinesComponent(lines));
+
+				try {
+					tui.start();
+					await settle(term);
+					expect(visible(term)).toEqual(["row-2", "row-3", "row-4", "input"]);
+
+					// Warp repaints geometry in-place to avoid alt-screen resize loops. Once
+					// the viewport grows, the short frame must still reappear with blanks on
+					// top instead of staying anchored below the old committed boundary.
+					term.resize(16, 8);
+					await settleResize(term);
+					expect(visible(term)).toEqual(["", "", "row-0", "row-1", "row-2", "row-3", "row-4", "input"]);
+				} finally {
+					tui.stop();
+					await term.flush();
+				}
+			},
+		);
+	});
+
 	it("pins the cursor marker to the bottom-aligned row", async () => {
 		const term = new VirtualTerminal(20, 6, 100);
 		const tui = new TUI(term, undefined, { bottomAlignShortFrame: true });
