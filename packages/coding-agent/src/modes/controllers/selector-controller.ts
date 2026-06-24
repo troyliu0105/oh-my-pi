@@ -61,6 +61,7 @@ import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
+import { AgentsDashboard } from "../components/agents-dashboard";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
 import { ExtensionDashboard } from "../components/extensions";
@@ -1436,6 +1437,46 @@ export class SelectorController {
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(hub);
 		this.ctx.ui.setFocus(hub);
+		this.ctx.ui.requestRender();
+	}
+
+	showAgentsActivityDashboard(observers: SessionObserverRegistry): void {
+		const dashboardKeys = [
+			...this.ctx.keybindings.getKeys("app.agents.hub"),
+			...this.ctx.keybindings.getKeys("app.session.observe"),
+		];
+		let dashboard: AgentsDashboard | undefined;
+		let overlay: OverlayHandle | undefined;
+		const done = () => {
+			dashboard?.dispose();
+			overlay?.hide();
+			this.ctx.ui.setFocus(this.ctx.editor);
+			this.ctx.ui.requestRender();
+		};
+		dashboard = new AgentsDashboard({
+			observers,
+			dashboardKeys,
+			expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
+			onClose: done,
+			requestRender: () => this.ctx.ui.requestRender(),
+			registry: this.ctx.collabGuest?.agentRegistry,
+			remote: this.ctx.collabGuest?.hubRemote,
+			ui: this.ctx.ui,
+			getTool: name => this.ctx.session.getToolByName(name),
+			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
+			cwd: this.ctx.sessionManager.getCwd(),
+			hideThinkingBlock: () => this.ctx.hideThinkingBlock,
+			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
+		});
+		overlay = this.ctx.ui.showOverlay(dashboard, {
+			width: "100%",
+			maxHeight: "100%",
+			anchor: "top-left",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.ctx.ui.setFocus(dashboard);
 		this.ctx.ui.requestRender();
 	}
 }

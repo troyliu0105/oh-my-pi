@@ -1135,6 +1135,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "agents-dashboard",
+		description: "Open live subagent activity dashboard",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showAgentsActivityDashboard();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "branch",
 		description: "Create a new branch from a previous message",
 		handleTui: (_command, runtime) => {

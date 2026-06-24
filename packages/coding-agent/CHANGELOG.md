@@ -426,6 +426,11 @@
 - Fixed extension `tool_call`/`tool_result` events for hashline `edit` calls to expose `event.input.path` for single-file edits and `event.input.paths` for every parsed target, so planning-mode gates can allow one markdown plan edit but still block multi-file hashline calls that cannot be represented by one path ([#1678](https://github.com/can1357/oh-my-pi/issues/1678)).
 - Fixed scripted `eval` `agent()` subagents continuing after a successful `yield` when a trailing empty assistant `stop` arrived after the executor's yield-triggered abort. The session's `agent_end` maintenance compared `#assistantEndedWithSuccessfulYield(msg)` against the trailing empty-stop message — not the prior yield-bearing one — so the empty-stop recovery path appended a retry reminder and scheduled `agent.continue()`, reviving the already-yielded child. The yield handler now sets a sticky `#yieldTerminationPending` flag (cleared on the next `prompt()`) that short-circuits empty-stop / unexpected-stop / compaction continuations for the rest of the run, so a successful yield is terminal regardless of trailing stops ([#3389](https://github.com/can1357/oh-my-pi/issues/3389)).
 - Fixed snapcompact rasterizing transcript frames into requests bound for GitHub Copilot business and enterprise endpoints, which then rejected the session permanently with `400 vision is not supported`. The snapcompact vision gate now also short-circuits whenever `model.provider === "github-copilot"` and the resolved `baseUrl` is not the canonical personal-Copilot host, protecting cached/stale Model specs that still advertise `["text","image"]` on a non-personal endpoint. ([#3387](https://github.com/can1357/oh-my-pi/issues/3387))
+
+### Added
+
+- Added `/agents-dashboard`, a fullscreen live subagent dashboard showing runtime agent status, progress, unread IRC mailbox previews, and direct IRC send controls.
+
 ### Fixed
 
 - Fixed the interactive input editor drifting above the terminal bottom when the rendered conversation was shorter than the viewport; the TUI now bottom-aligns short frames so the editor's bottom border stays on the terminal's last row until the transcript overflows.
