@@ -429,7 +429,7 @@
 ### Fixed
 
 - Fixed the interactive input editor drifting above the terminal bottom when the rendered conversation was shorter than the viewport; the TUI now bottom-aligns short frames so the editor's bottom border stays on the terminal's last row until the transcript overflows.
-- Fixed auto-retry not triggering for HTTP 429/408/5xx errors whose response body carries a locale-specific message with no English keywords or status digits (e.g. Z.AI/Zhipu GLM `{"error":{"code":"1305","message":"该模型当前访问量过大，请您稍后再试"}}`). The session retry classifier now checks the structured `errorStatus` field on the assistant message in addition to regex-matching the error message text, so transient HTTP errors are retried regardless of the response body language. The same fix was applied to the auto-compaction summarization retry path.
+- Fixed auto-retry not triggering for HTTP 429/408/5xx errors whose response body carries a locale-specific message with no English keywords or status digits (e.g. Z.AI/Zhipu GLM `{"error":{"code":"1305","message":"该模型当前访问量过大，请您稍后再试"}}`). The session retry classifier now checks the structured `errorStatus` field on the assistant message in addition to regex-matching the error message text, so transient HTTP errors are retried regardless of the response body language. Retry fallback chains now spend the configured retry budget on the current model before switching to the next fallback model, then reset that budget for the newly selected model. The same fix was applied to the auto-compaction summarization retry path.
 
 ## [16.1.16] - 2026-06-23
 

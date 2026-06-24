@@ -126,6 +126,9 @@ describe("AgentSession retry fallback", () => {
 		const fallbackSucceededEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
 
 		const mock = createMockModel();
+		let primaryAttempts = 0;
+		let firstFallbackAttempts = 0;
+		const timeoutMessage = "OpenAI completions stream timed out while waiting for the first event";
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
@@ -137,9 +140,22 @@ describe("AgentSession retry fallback", () => {
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
-					mock.push({ throw: "overloaded_error: provider returned error 503" });
+					primaryAttempts += 1;
+					if (primaryAttempts <= 2) {
+						mock.push({
+							throw: "该模型当前访问量过大，请您稍后再试",
+							errorStatus: 429,
+						});
+					} else {
+						throw new Error("Primary model should have fallen back after exhausting its retry budget");
+					}
 				} else if (model.provider === firstFallback.provider && model.id === firstFallback.id) {
-					mock.push({ throw: "service unavailable: 503 overloaded" });
+					firstFallbackAttempts += 1;
+					if (firstFallbackAttempts <= 2) {
+						mock.push({ throw: timeoutMessage });
+					} else {
+						throw new Error("First fallback should have fallen back after exhausting its retry budget");
+					}
 				} else if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
 					mock.push({ content: ["Recovered on second fallback"] });
 				} else {
@@ -152,6 +168,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
 			"retry.fallbackChains": {
 				default: [
 					`${firstFallback.provider}/${firstFallback.id}`,
@@ -182,18 +199,21 @@ describe("AgentSession retry fallback", () => {
 				fallbackSucceededEvents.push(event);
 			}
 		});
+		vi.spyOn(Math, "random").mockReturnValue(0);
 
 		await session.prompt("Recover from rate limits");
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([
 			`${primaryModel.provider}/${primaryModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${firstFallback.provider}/${firstFallback.id}`,
 			`${firstFallback.provider}/${firstFallback.id}`,
 			`${secondFallback.provider}/${secondFallback.id}`,
 		]);
 		expect(session.model?.provider).toBe(secondFallback.provider);
 		expect(session.model?.id).toBe(secondFallback.id);
-		expect(retryStartEvents.map(event => event.delayMs)).toEqual([0, 0]);
+		expect(retryStartEvents.map(event => event.delayMs)).toEqual([5, 0, 20, 0]);
 		expect(fallbackAppliedEvents).toEqual([
 			{
 				type: "retry_fallback_applied",
@@ -209,7 +229,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		]);
 		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 2 });
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 4 });
 		expect(fallbackSucceededEvents).toEqual([
 			{
 				type: "retry_fallback_succeeded",
@@ -426,7 +446,7 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
-	it("does not exceed retry.maxRetries for classifier fallback chains", async () => {
+	it("retries the current model before continuing through classifier fallback chains", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
 		const secondFallback = getBundledModel("openai", "gpt-4o");
@@ -438,6 +458,7 @@ describe("AgentSession retry fallback", () => {
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
 		const mock = createMockModel();
+		let secondFallbackAttempts = 0;
 		const refusalMessage = "Refusal (cyber): Classifier declined this fallback turn.";
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
@@ -461,6 +482,13 @@ describe("AgentSession retry fallback", () => {
 						},
 						errorMessage: refusalMessage,
 					});
+				} else if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
+					secondFallbackAttempts += 1;
+					if (secondFallbackAttempts === 1) {
+						mock.push({ throw: "OpenAI completions stream timed out while waiting for the first event" });
+					} else {
+						mock.push({ content: ["Recovered on classifier fallback"] });
+					}
 				} else {
 					throw new Error(
 						`Unexpected model requested after retry budget exhaustion: ${model.provider}/${model.id}`,
@@ -497,13 +525,17 @@ describe("AgentSession retry fallback", () => {
 				retryEndEvents.push(event);
 			}
 		});
+		vi.spyOn(Math, "random").mockReturnValue(0);
 
 		await session.prompt("Stop after the configured retry budget");
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([
 			`${primaryModel.provider}/${primaryModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
 			`${firstFallback.provider}/${firstFallback.id}`,
+			`${secondFallback.provider}/${secondFallback.id}`,
+			`${secondFallback.provider}/${secondFallback.id}`,
 		]);
 		expect(fallbackAppliedEvents).toEqual([
 			{
@@ -512,13 +544,18 @@ describe("AgentSession retry fallback", () => {
 				to: `${firstFallback.provider}/${firstFallback.id}`,
 				role: "default",
 			},
+			{
+				type: "retry_fallback_applied",
+				from: `${firstFallback.provider}/${firstFallback.id}`,
+				to: `${secondFallback.provider}/${secondFallback.id}`,
+				role: "default",
+			},
 		]);
 		expect(retryEndEvents).toEqual([
 			{
 				type: "auto_retry_end",
-				success: false,
-				attempt: 1,
-				finalError: refusalMessage,
+				success: true,
+				attempt: 4,
 			},
 		]);
 	});
@@ -1222,6 +1259,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
 			"retry.fallbackChains": {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
@@ -1278,6 +1316,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
 			"retry.fallbackChains": {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
@@ -1313,6 +1352,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
 			"retry.fallbackChains": {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
@@ -1407,6 +1447,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
 			"retry.fallbackChains": {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
@@ -1457,6 +1498,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
 			"retry.fallbackChains": {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},

@@ -1402,6 +1402,7 @@ export class AgentSession {
 	// Retry state
 	#retryAbortController: AbortController | undefined = undefined;
 	#retryAttempt = 0;
+	#retryModelAttempt = 0;
 	#retryPromise: Promise<void> | undefined = undefined;
 	#retryResolve: (() => void) | undefined = undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined = undefined;
@@ -3269,6 +3270,7 @@ export class AgentSession {
 						attempt: this.#retryAttempt,
 					});
 					this.#retryAttempt = 0;
+					this.#retryModelAttempt = 0;
 				}
 				if (assistantMsg.provider === "opencode-go") {
 					this.#modelRegistry.authStorage.recordUsageCost(assistantMsg.provider, assistantMsg.usage.cost.total, {
@@ -9758,6 +9760,7 @@ export class AgentSession {
 					attempt: this.#retryAttempt,
 					finalError: "Assistant returned empty stop after retry cap",
 				});
+				this.#retryModelAttempt = 0;
 				this.#retryAttempt = 0;
 			}
 			this.#resolveRetry();
@@ -12430,6 +12433,7 @@ export class AgentSession {
 
 		const generation = this.#promptGeneration;
 		this.#retryAttempt++;
+		this.#retryModelAttempt++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -12437,19 +12441,6 @@ export class AgentSession {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#retryPromise = promise;
 			this.#retryResolve = resolve;
-		}
-
-		if (this.#retryAttempt > retrySettings.maxRetries) {
-			// Max retries exceeded, emit final failure and reset
-			await this.#emitSessionEvent({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this.#retryAttempt - 1,
-				finalError: message.errorMessage,
-			});
-			this.#retryAttempt = 0;
-			this.#resolveRetry(); // Resolve so waitForRetry() completes
-			return false;
 		}
 
 		const errorMessage = message.errorMessage || "Unknown error";
@@ -12464,6 +12455,8 @@ export class AgentSession {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		const usageLimitError = AIError.is(id, AIError.Flag.UsageLimit);
+		const transientRetryable = AIError.is(id, AIError.Flag.Transient);
 
 		if (staleOpenAIResponsesReplayError) {
 			this.#resetCurrentResponsesProviderSession("stale replay error");
@@ -12514,8 +12507,40 @@ export class AgentSession {
 
 		const allowModelFallback = options?.allowModelFallback !== false;
 		const currentSelector = this.model ? formatRetryFallbackSelector(this.model, this.thinkingLevel) : undefined;
-		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
-			if (allowModelFallback && retrySettings.modelFallback) {
+		const shouldRetryCurrentModelFirst =
+			!options?.fireworksFastFallback &&
+			!classifierRefusal &&
+			!staleOpenAIResponsesReplayError &&
+			!switchedCredential &&
+			!usageLimitError &&
+			transientRetryable &&
+			currentSelector !== undefined;
+
+		if (this.#retryModelAttempt > retrySettings.maxRetries) {
+			if (shouldRetryCurrentModelFirst && allowModelFallback && retrySettings.modelFallback && currentSelector) {
+				this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
+				switchedModel = await this.#tryRetryModelFallback(currentSelector);
+				if (switchedModel) {
+					this.#retryModelAttempt = 0;
+					delayMs = 0;
+				}
+			}
+			if (!switchedModel) {
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt: this.#retryAttempt - 1,
+					finalError: message.errorMessage,
+				});
+				this.#retryAttempt = 0;
+				this.#retryModelAttempt = 0;
+				this.#resolveRetry(); // Resolve so waitForRetry() completes
+				return false;
+			}
+		}
+
+		if (!switchedModel && !staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
+			if (allowModelFallback && retrySettings.modelFallback && !shouldRetryCurrentModelFirst) {
 				if (!classifierRefusal) {
 					this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
@@ -12529,6 +12554,7 @@ export class AgentSession {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
 			if (switchedModel) {
+				this.#retryModelAttempt = 0;
 				delayMs = 0;
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;
@@ -12536,6 +12562,7 @@ export class AgentSession {
 		}
 		if (classifierRefusal && !switchedModel) {
 			this.#retryAttempt = 0;
+			this.#retryModelAttempt = 0;
 			this.#resolveRetry();
 			return false;
 		}
@@ -12545,6 +12572,7 @@ export class AgentSession {
 		// classifier wouldn't retry — surface it instead.
 		if (options?.fireworksFastFallback && !switchedModel && !this.#isRetryableError(message)) {
 			this.#retryAttempt = 0;
+			this.#retryModelAttempt = 0;
 			this.#resolveRetry();
 			return false;
 		}
@@ -12560,6 +12588,7 @@ export class AgentSession {
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
+			this.#retryModelAttempt = 0;
 			await this.#emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
@@ -12600,6 +12629,7 @@ export class AgentSession {
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
+			this.#retryModelAttempt = 0;
 			this.#retryAbortController = undefined;
 			await this.#emitSessionEvent({
 				type: "auto_retry_end",
@@ -12712,6 +12742,7 @@ export class AgentSession {
 
 		// Reset retry budget for a fresh attempt
 		this.#retryAttempt = 0;
+		this.#retryModelAttempt = 0;
 
 		// Re-attempt the turn
 		this.#scheduleAgentContinue({ delayMs: 1 });
