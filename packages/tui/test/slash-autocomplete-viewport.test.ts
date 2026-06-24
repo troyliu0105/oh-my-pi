@@ -157,6 +157,82 @@ describe("slash command autocomplete with unknown native viewport state", () => 
 		}
 	});
 
+	it("repaints autocomplete shrink after deleting back to an empty editor", async () => {
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
+		let tui: TUI | undefined;
+		try {
+			const term = new VirtualTerminal(40, 8);
+			tui = new TUI(term);
+			const root = new Container();
+			root.addChild({
+				invalidate() {},
+				render: () => ["chat-0", "chat-1", "chat-2", "chat-3", "chat-4", "chat-5", "chat-6"],
+			});
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new SlashProvider());
+			editor.onAutocompleteUpdate = () => {
+				tui?.requestRender();
+			};
+			root.addChild(editor);
+			tui.addChild(root);
+			tui.setFocus(editor);
+
+			tui.start();
+			await settle(term);
+			for (const char of "/st") {
+				term.sendInput(char);
+				await settle(term);
+			}
+			expect(editor.getText()).toBe("/st");
+			expect(term.getScrollBuffer()).toEqual([
+				"chat-0",
+				"chat-1",
+				"chat-2",
+				"chat-3",
+				"chat-4",
+				"chat-5",
+				"chat-6",
+				"+--------------------------------------+",
+				"+- /st|                               -+",
+				"> status",
+				"  stats",
+				"  stop",
+				"",
+				"",
+			]);
+
+			for (let i = 0; i < 3; i++) {
+				term.sendInput("\x7f");
+				await settle(term);
+			}
+			const viewport = term.getViewport().join("\n");
+			expect(editor.getText()).toBe("");
+			expect(viewport).not.toContain("status");
+			expect(viewport).not.toContain("stats");
+			expect(viewport).not.toContain("stop");
+			expect(term.getScrollBuffer()).toEqual([
+				"chat-0",
+				"chat-1",
+				"chat-2",
+				"chat-3",
+				"chat-4",
+				"chat-5",
+				"chat-6",
+				"+--------------------------------------+",
+				"+- |                                  -+",
+				"",
+				"",
+				"",
+				"",
+				"",
+			]);
+		} finally {
+			tui?.stop();
+			Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
+		}
+	});
+
 	it("repaints autocomplete updates coalesced with offscreen background mutations", async () => {
 		const originalPlatform = process.platform;
 		const originalWtSession = Bun.env.WT_SESSION;

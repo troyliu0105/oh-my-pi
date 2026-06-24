@@ -398,6 +398,28 @@ describe("Editor component", () => {
 		});
 	});
 
+	it("cancels slash autocomplete immediately when backspacing to an empty editor", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{ name: "model", description: "Select a model" },
+					{ name: "help", description: "Show help" },
+				],
+				"/tmp",
+			),
+		);
+
+		editor.handleInput("/");
+		await Bun.sleep(0);
+		expect(editor.getText()).toBe("/");
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		editor.handleInput("\x7f");
+		expect(editor.getText()).toBe("");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+	});
+
 	describe("Unicode text editing behavior", () => {
 		it("inserts mixed ASCII, umlauts, and emojis as literal text", () => {
 			const editor = new Editor(defaultEditorTheme);

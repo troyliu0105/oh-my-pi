@@ -1897,21 +1897,30 @@ export class Editor implements Component, Focusable {
 		this.#insertTextAtCursor(marker);
 	}
 
+	/** Whether the current cursor position still sits inside a regular autocomplete context. */
+	#hasRegularAutocompleteContextAtCursor(): boolean {
+		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+		return (
+			this.#isInSubmittedSlashCommandContext() ||
+			textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/) !== null ||
+			textBeforeCursor.match(/#[^\s#]*$/) !== null ||
+			this.#textTriggersUrlAutocomplete(textBeforeCursor)
+		);
+	}
+
 	/** Re-evaluate autocomplete triggers for the text ending at the cursor (used after bulk edits). */
 	#retriggerAutocompleteAtCursor(): void {
 		if (this.#autocompleteState) {
+			if (this.#autocompleteState === "regular" && !this.#hasRegularAutocompleteContextAtCursor()) {
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
+				return;
+			}
 			this.#debouncedUpdateAutocomplete();
 			return;
 		}
-		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-		if (this.#isInSlashAutocompleteContext()) {
-			this.#tryTriggerAutocomplete();
-		} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
-			this.#tryTriggerAutocomplete();
-		} else if (textBeforeCursor.match(/#[^\s#]*$/)) {
-			this.#tryTriggerAutocomplete();
-		} else if (this.#textTriggersUrlAutocomplete(textBeforeCursor)) {
+		if (this.#hasRegularAutocompleteContextAtCursor()) {
 			this.#tryTriggerAutocomplete();
 		}
 	}
@@ -2064,30 +2073,8 @@ export class Editor implements Component, Focusable {
 			this.onChange(this.getText());
 		}
 
-		// Update or re-trigger autocomplete after backspace
-		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
-		} else {
-			// If autocomplete was cancelled (no matches), re-trigger if we're in a completable context
-			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-			// Slash command or mid-prompt skill lookup context
-			if (this.#isInSlashAutocompleteContext()) {
-				this.#tryTriggerAutocomplete();
-			}
-			// @ file reference context
-			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
-				this.#tryTriggerAutocomplete();
-			}
-			// # prompt action context
-			else if (textBeforeCursor.match(/#[^\s#]*$/)) {
-				this.#tryTriggerAutocomplete();
-			}
-			// internal URL scheme context (e.g. local://, skill://)
-			else if (this.#textTriggersUrlAutocomplete(textBeforeCursor)) {
-				this.#tryTriggerAutocomplete();
-			}
-		}
+		// Update or re-trigger autocomplete after backspace.
+		this.#retriggerAutocompleteAtCursor();
 	}
 
 	/**
@@ -2235,21 +2222,7 @@ export class Editor implements Component, Focusable {
 			this.onChange(this.getText());
 		}
 
-		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
-		} else {
-			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-			if (this.#isInSlashAutocompleteContext()) {
-				this.#tryTriggerAutocomplete();
-			} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
-				this.#tryTriggerAutocomplete();
-			} else if (textBeforeCursor.match(/#[^\s#]*$/)) {
-				this.#tryTriggerAutocomplete();
-			} else if (this.#textTriggersUrlAutocomplete(textBeforeCursor)) {
-				this.#tryTriggerAutocomplete();
-			}
-		}
+		this.#retriggerAutocompleteAtCursor();
 	}
 
 	#matchesTransientUndoSnapshot(
@@ -2566,29 +2539,8 @@ export class Editor implements Component, Focusable {
 			this.onChange(this.getText());
 		}
 
-		// Update or re-trigger autocomplete after forward delete
-		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
-		} else {
-			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-			// Slash command or mid-prompt skill lookup context
-			if (this.#isInSlashAutocompleteContext()) {
-				this.#tryTriggerAutocomplete();
-			}
-			// @ file reference context
-			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
-				this.#tryTriggerAutocomplete();
-			}
-			// # prompt action context
-			else if (textBeforeCursor.match(/#[^\s#]*$/)) {
-				this.#tryTriggerAutocomplete();
-			}
-			// internal URL scheme context (e.g. local://, skill://)
-			else if (this.#textTriggersUrlAutocomplete(textBeforeCursor)) {
-				this.#tryTriggerAutocomplete();
-			}
-		}
+		// Update or re-trigger autocomplete after forward delete.
+		this.#retriggerAutocompleteAtCursor();
 	}
 
 	/**

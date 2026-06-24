@@ -77,6 +77,7 @@
 ### Fixed
 
 - Fixed bottom-pinned input/footer layouts losing their bottom anchor after content had already overflowed into native scrollback and a tmux/Warp-style in-place resize grew the viewport. The resize path still floored `windowTop` at the stale committed boundary whenever the frame remained taller than the new viewport, so the live tail (including the prompt editor) stayed stranded above newly exposed blank rows instead of re-showing the real frame tail. Bottom-aligned in-place grows now re-slice to `frameLength - height` whenever that stale committed floor would leave a gap, preferring a few duplicated history rows over a live editor gap.
+- Fixed slash-command autocomplete leaving the prompt region stuck at the popup's full height after the user deleted back to an empty editor. Backspace/forward-delete/undo previously kept a live regular autocomplete session open until the debounced provider refresh came back empty, so slow slash providers could leave stale menu rows visible long after the `/` prefix was gone. Bulk edit paths now cancel regular autocomplete immediately once the cursor leaves every completable context.
 
 ## [16.1.10] - 2026-06-21
 
