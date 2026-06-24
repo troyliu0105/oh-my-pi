@@ -46,6 +46,23 @@ interface IrcWaiter {
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
+/**
+ * Reply-loop guard window. Two agents exchanging identical or near-identical
+ * bodies ("Confirmed.", "Done.", single-word acknowledgements) can ping-pong
+ * forever: each idle wake turn fires a real reply that re-wakes the peer.
+ * The guard tracks `(from,to,body)` triples within this window and refuses
+ * delivery once a pair exceeds {@link IRC_LOOP_LIMIT} repeats, returning a
+ * `failed` receipt whose error text tells the agent the loop was broken.
+ */
+const IRC_LOOP_WINDOW_MS = 60_000;
+
+/**
+ * Hard cap on consecutive identical bodies in one direction before the loop
+ * guard trips. Three lets a normal question→answer→acknowledgement exchange
+ * through but stops the degenerate ping-pong before it floods the transcript.
+ */
+const IRC_LOOP_LIMIT = 3;
+
 export class IrcBus {
 	static #global: IrcBus | undefined;
 
@@ -65,12 +82,33 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	/**
+	 * Sliding-window log of `(from,to,normalizedBody)` → send timestamps, for
+	 * the reply-loop guard. Entries are pruned to {@link IRC_LOOP_WINDOW_MS}
+	 * on each access.
+	 */
+	readonly #replyLoopLog = new Map<string, number[]>();
+	/** Reply-loop limit (0 disables). Configurable via {@link IrcBus.configureLoopGuard}. */
+	#loopLimit: number;
 
-	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
+	constructor(
+		registry: AgentRegistry = AgentRegistry.global(),
+		lifecycle?: AgentLifecycleManager,
+		loopLimit: number = IRC_LOOP_LIMIT,
+	) {
 		this.#registry = registry;
+		this.#loopLimit = loopLimit;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	/**
+	 * Apply the `irc.loopGuard` setting to the (global) bus at tool-construction
+	 * time. Called once per session init; `0` disables the guard entirely.
+	 */
+	configureLoopGuard(limit: number): void {
+		this.#loopLimit = Math.max(0, Math.floor(limit));
 	}
 
 	/**
@@ -102,6 +140,10 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		const loopError = this.#checkReplyLoop(message);
+		if (loopError) {
+			return { to: message.to, outcome: "failed", error: loopError };
+		}
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.status === "aborted") {
 			return { to: message.to, outcome: "failed", error: `Unknown or terminated agent "${message.to}".` };
@@ -287,6 +329,55 @@ export class IrcBus {
 		const [message] = mailbox.splice(index, 1);
 		if (mailbox.length === 0) this.#mailboxes.delete(agentId);
 		return message;
+	}
+
+	/**
+	 * Reply-loop guard: count identical `(from,to,body)` sends within
+	 * {@link IRC_LOOP_WINDOW_MS}. Returns a descriptive error string when the
+	 * pair has exceeded the loop limit, so the sender sees a `failed` receipt
+	 * and stops replying. Returns `null` when the send is allowed (and records
+	 * the timestamp either way so legitimate follow-ups are tracked).
+	 *
+	 * The key is directional (`A→B` and `B→A` are independent), so a genuine
+	 * back-and-forth that changes content each time is never blocked — only
+	 * the degenerate case where the *same body* repeats in the *same
+	 * direction* beyond the limit.
+	 */
+	#checkReplyLoop(message: IrcMessage): string | null {
+		if (this.#loopLimit <= 0) return null;
+		const key = `${message.from}\0${message.to}\0${this.#normalizeBodyForLoop(message.body)}`;
+		const now = message.ts;
+		const windowStart = now - IRC_LOOP_WINDOW_MS;
+		let stamps = this.#replyLoopLog.get(key);
+		if (stamps) {
+			stamps = stamps.filter(t => t > windowStart);
+		} else {
+			stamps = [];
+		}
+		stamps.push(now);
+		if (stamps.length > this.#loopLimit) {
+			// Keep the entry so the guard stays armed for the window; just don't
+			// grow it unboundedly.
+			this.#replyLoopLog.set(key, stamps.slice(-this.#loopLimit - 1));
+			return (
+				`IRC reply loop detected: "${message.body.trim().slice(0, 60)}" was already sent ` +
+				`from ${message.from} to ${message.to} ${this.#loopLimit} times in the last ` +
+				`${Math.round(IRC_LOOP_WINDOW_MS / 1000)}s. Delivery blocked to break the cycle — ` +
+				`stop re-sending and continue your task.`
+			);
+		}
+		this.#replyLoopLog.set(key, stamps);
+		return null;
+	}
+
+	/**
+	 * Normalize a message body for loop-key comparison: collapse whitespace
+	 * and trim so trivial formatting differences ("Confirmed." vs "Confirmed. ")
+	 * don't evade the guard, while still distinguishing genuinely different
+	 * messages.
+	 */
+	#normalizeBodyForLoop(body: string): string {
+		return body.trim().replace(/\s+/g, " ").toLowerCase().slice(0, 120);
 	}
 
 	/**

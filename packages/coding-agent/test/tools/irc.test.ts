@@ -348,6 +348,78 @@ describe("IRC", () => {
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.unreadCount("0-Parked")).toBe(0);
 		});
+
+		describe("reply-loop guard", () => {
+			it("blocks delivery after the same body repeats beyond the limit in one direction", async () => {
+				const sub = makeFakeSession();
+				registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+				// Within-limit sends all deliver.
+				for (let i = 0; i < 3; i++) {
+					const receipt = await bus.send({ from: "0-Main", to: "0-Sub", body: "Confirmed." });
+					expect(receipt.outcome).toBe("injected");
+				}
+				expect(sub.delivered.length).toBe(3);
+
+				// The 4th identical body in the same direction trips the guard.
+				const blocked = await bus.send({ from: "0-Main", to: "0-Sub", body: "Confirmed." });
+				expect(blocked.outcome).toBe("failed");
+				expect(blocked.error).toContain("reply loop detected");
+				// The message was never delivered to the recipient.
+				expect(sub.delivered.length).toBe(3);
+			});
+
+			it("does not block the reverse direction — each side has its own counter", async () => {
+				const a = makeFakeSession();
+				const b = makeFakeSession();
+				registry.register({ id: "0-A", displayName: "task", kind: "sub", session: a.session });
+				registry.register({ id: "0-B", displayName: "task", kind: "sub", session: b.session });
+
+				// Three sends A→B and three sends B→A with the same body: both
+				// directions are independent and must all go through.
+				for (let i = 0; i < 3; i++) {
+					expect((await bus.send({ from: "0-A", to: "0-B", body: "ack" })).outcome).toBe("injected");
+					expect((await bus.send({ from: "0-B", to: "0-A", body: "ack" })).outcome).toBe("injected");
+				}
+				expect(a.delivered.length).toBe(3);
+				expect(b.delivered.length).toBe(3);
+			});
+
+			it("does not block genuine back-and-forth with different content", async () => {
+				const sub = makeFakeSession();
+				registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+				const bodies = ["what file are you editing?", "src/auth.ts", "thanks, I'll avoid it", "good"];
+				for (const body of bodies) {
+					const receipt = await bus.send({ from: "0-Main", to: "0-Sub", body });
+					expect(receipt.outcome).toBe("injected");
+				}
+				expect(sub.delivered.length).toBe(4);
+			});
+
+			it("normalizes whitespace and case so trivial variants don't evade the guard", async () => {
+				const sub = makeFakeSession();
+				registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+				expect((await bus.send({ from: "0-Main", to: "0-Sub", body: "Confirmed." })).outcome).toBe("injected");
+				expect((await bus.send({ from: "0-Main", to: "0-Sub", body: "  confirmed.  " })).outcome).toBe("injected");
+				expect((await bus.send({ from: "0-Main", to: "0-Sub", body: "CONFIRMED." })).outcome).toBe("injected");
+				const blocked = await bus.send({ from: "0-Main", to: "0-Sub", body: "Confirmed." });
+				expect(blocked.outcome).toBe("failed");
+			});
+
+			it("a guard disabled via configureLoopGuard(0) never blocks", async () => {
+				const sub = makeFakeSession();
+				registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+				bus.configureLoopGuard(0);
+
+				for (let i = 0; i < 10; i++) {
+					const receipt = await bus.send({ from: "0-Main", to: "0-Sub", body: "Confirmed." });
+					expect(receipt.outcome).toBe("injected");
+				}
+				expect(sub.delivered.length).toBe(10);
+			});
+		});
 	});
 
 	describe("IrcTool", () => {

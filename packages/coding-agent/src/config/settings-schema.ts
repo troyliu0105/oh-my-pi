@@ -3722,6 +3722,17 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"irc.loopGuard": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "IRC Reply Loop Guard",
+			description:
+				"Max identical messages from one agent to another within 60s before delivery is blocked to break a ping-pong loop. 0 disables.",
+		},
+	},
 
 	"bash.autoBackground.thresholdMs": {
 		type: "number",

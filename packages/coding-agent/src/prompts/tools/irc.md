@@ -21,3 +21,4 @@ Message peers instead of guessing, duplicating work, or spying.
 - If you overlap with another agent's work or need a file they are touching, DM them before editing.
 - NEVER use shell tools, grep, or read other sessions' files to figure out what a peer is doing. Message them directly.
 - NEVER use IRC for something a tool can answer (e.g., grepping codebase, running a build).
+- NEVER send bare acknowledgements ("Confirmed.", "Got it.", "Done."). If a peer's message needs no action or answer from you, do nothing — silence is the correct response. A reply that only confirms receipt triggers the recipient to reply back, which loops forever. A `failed` receipt that mentions "reply loop detected" means you and a peer are bouncing the same message — STOP, do not re-send, continue your task.

@@ -145,6 +145,10 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 	static createIf(session: ToolSession): IrcTool | null {
 		if (!isIrcEnabled(session.settings, session.taskDepth ?? 0)) return null;
 		if (!session.agentRegistry || !session.getAgentId) return null;
+		// Apply the configured reply-loop limit to the process-global bus. The
+		// bus is a lazy singleton shared across all sessions, so the last init
+		// wins — acceptable since the setting is global, not per-session.
+		IrcBus.global().configureLoopGuard(session.settings.get("irc.loopGuard"));
 		return new IrcTool(session);
 	}
 
