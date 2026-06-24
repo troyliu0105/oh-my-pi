@@ -74,6 +74,10 @@
 
 - Added an opt-in `bottomAlignShortFrame` TUI option that pins a frame shorter than the viewport to the terminal bottom (blank rows above the content) instead of the long-standing top-aligned geometry, so applications with a bottom input/footer region keep it on the last terminal row. Overflow behavior is unchanged: a frame taller than the viewport still tail-follows and commits to native scrollback as before.
 
+### Fixed
+
+- Fixed bottom-pinned input/footer layouts losing their bottom anchor after content had already overflowed into native scrollback and a tmux/Warp-style in-place resize grew the viewport. The resize path still floored `windowTop` at the stale committed boundary whenever the frame remained taller than the new viewport, so the live tail (including the prompt editor) stayed stranded above newly exposed blank rows instead of re-showing the real frame tail. Bottom-aligned in-place grows now re-slice to `frameLength - height` whenever that stale committed floor would leave a gap, preferring a few duplicated history rows over a live editor gap.
+
 ## [16.1.10] - 2026-06-21
 
 ### Fixed

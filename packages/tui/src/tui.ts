@@ -2735,6 +2735,12 @@ export class TUI extends Container {
 		const replaceRequested = this.#clearScrollbackOnNextRender;
 		const geometryRebuild = geometryChanged && !resizeRepaintsInPlace();
 		const fullPaint = firstPaint || replaceRequested || geometryRebuild;
+		const overflowTailBottomAlignReslice =
+			this.#bottomAlignShortFrame &&
+			geometryChanged &&
+			resizeRepaintsInPlace() &&
+			frameLength > height &&
+			this.#committedRows > Math.max(0, frameLength - height);
 		let windowTop: number;
 		let chunkTo: number;
 		let committedPrefixResliced = false;
@@ -2747,18 +2753,20 @@ export class TUI extends Container {
 			(committedRowsResynced &&
 				frameLength - this.#committedRows < height &&
 				cursorMarkers.some(marker => marker.row >= this.#committedRows)) ||
-			(bottomPaddingRows > 0 && this.#committedRows > 0)
+			(bottomPaddingRows > 0 && this.#committedRows > 0) ||
+			overflowTailBottomAlignReslice
 		) {
 			// Either the frame shrank into the committed prefix, a committed-prefix
-			// resync left a focused cursor tail shorter than the viewport, or the
-			// frame is now short enough to bottom-align with blank rows above it.
+			// resync left a focused cursor tail shorter than the viewport, the frame
+			// is now short enough to bottom-align with blank rows above it, or an
+			// in-place geometry grow left the committed floor above the new tail top.
 			// The first two cases are existing duplication-never-loss paths. The
-			// bottom-aligned short-frame case is the same geometric problem under a
-			// different trigger: flooring windowTop at the old committed boundary
-			// would pin the input near the top and leave a blank gap underneath.
-			// Re-show the full frame tail instead; any stale committed copy stays in
-			// native history, and a few duplicated rows are preferable to a live
-			// editor gap during tmux / Warp-style in-place resize paths.
+			// bottom-aligned cases are the same geometric problem under different
+			// triggers: flooring windowTop at the old committed boundary would pin the
+			// input above newly exposed blank rows. Re-show the full frame tail
+			// instead; any stale committed copy stays in native history, and a few
+			// duplicated rows are preferable to a live editor gap during tmux /
+			// Warp-style in-place resize paths.
 			windowTop = Math.max(0, frameLength - height);
 			chunkTo = windowTop;
 			committedPrefixResliced = true;

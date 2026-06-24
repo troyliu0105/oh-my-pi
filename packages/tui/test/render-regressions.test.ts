@@ -4426,6 +4426,31 @@ describe("bottomAlignShortFrame", () => {
 		});
 	});
 
+	it("tmux height grows keep an overflowing tail pinned to the bottom", async () => {
+		await withEnvPatch({ TMUX: "1", STY: undefined, ZELLIJ: undefined }, async () => {
+			const term = new VirtualTerminal(20, 4, 100);
+			const tui = new TUI(term, undefined, { bottomAlignShortFrame: true });
+			const lines = ["row-0", "row-1", "row-2", "row-3", "row-4", "row-5", "input"];
+			tui.addChild(new MutableLinesComponent(lines));
+
+			try {
+				tui.start();
+				await settle(term);
+				expect(visible(term)).toEqual(["row-3", "row-4", "row-5", "input"]);
+
+				// Height 4 -> 5 still leaves the same 7 logical rows overflowing. tmux
+				// repaints geometry in place, so the old committed boundary must not keep
+				// the prompt stranded above newly exposed blank rows once the viewport grows.
+				term.resize(20, 5);
+				await settleResize(term);
+				expect(visible(term)).toEqual(["row-2", "row-3", "row-4", "row-5", "input"]);
+			} finally {
+				tui.stop();
+				await term.flush();
+			}
+		});
+	});
+
 	it("Warp-style in-place resizes keep a newly short frame bottom-aligned", async () => {
 		await withEnvPatch(
 			{ TERM_PROGRAM: "WarpTerminal", TMUX: undefined, STY: undefined, ZELLIJ: undefined },
