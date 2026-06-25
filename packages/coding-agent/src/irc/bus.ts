@@ -90,6 +90,14 @@ export class IrcBus {
 	readonly #replyLoopLog = new Map<string, number[]>();
 	/** Reply-loop limit (0 disables). Configurable via {@link IrcBus.configureLoopGuard}. */
 	#loopLimit: number;
+	/**
+	 * Passive send observers. Notified once per `send` with the final
+	 * {@link IrcMessage} and its {@link IrcDeliveryReceipt}. Pure
+	 * display/observability hook — never affects delivery semantics. Used by
+	 * the AgentsDashboard to render a live message log without the bus itself
+	 * retaining any history (it stays a stateless transport).
+	 */
+	readonly #sendListeners = new Set<(message: IrcMessage, receipt: IrcDeliveryReceipt) => void>();
 
 	constructor(
 		registry: AgentRegistry = AgentRegistry.global(),
@@ -140,6 +148,19 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		const receipt = await this.#dispatch(message, opts);
+		this.#notifySend(message, receipt);
+		return receipt;
+	}
+
+	/**
+	 * Core delivery (no observer side effects). Each terminal outcome is
+	 * returned to {@link send}, which fans it out to listeners exactly once.
+	 */
+	async #dispatch(
+		message: IrcMessage,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const loopError = this.#checkReplyLoop(message);
 		if (loopError) {
 			return { to: message.to, outcome: "failed", error: loopError };
@@ -201,6 +222,26 @@ export class IrcBus {
 				outcome: "failed",
 				error: error instanceof Error ? error.message : String(error),
 			};
+		}
+	}
+
+	/**
+	 * Subscribe to every `send` plus its final delivery receipt. Pure
+	 * observability: the bus retains no history; listeners must store their
+	 * own view if they need one. Returns an unsubscribe function.
+	 */
+	onSend(listener: (message: IrcMessage, receipt: IrcDeliveryReceipt) => void): () => void {
+		this.#sendListeners.add(listener);
+		return () => this.#sendListeners.delete(listener);
+	}
+
+	#notifySend(message: IrcMessage, receipt: IrcDeliveryReceipt): void {
+		for (const listener of this.#sendListeners) {
+			try {
+				listener(message, receipt);
+			} catch (error) {
+				logger.debug("IrcBus: send listener threw", { error: String(error) });
+			}
 		}
 	}
 

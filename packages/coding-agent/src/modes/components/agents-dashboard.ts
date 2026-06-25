@@ -57,6 +57,9 @@ type ComposeTarget = "direct" | "broadcast" | undefined;
 const AGE_TICK_MS = 5_000;
 const MAX_MAILBOX_PREVIEW = 5;
 const MAX_RECEIPT_LINES = 5;
+const MAX_IRC_LOG_LINES = 12;
+/** Bounded buffer of recent IRC traffic; oldest dropped beyond this. */
+const MAX_IRC_LOG_ENTRIES = 200;
 const ROSTER_MIN_WIDTH = 28;
 const DETAIL_MIN_WIDTH = 40;
 
@@ -65,6 +68,48 @@ const STATUS_ORDER: Record<AgentStatus, number> = { running: 0, idle: 1, parked:
 /** Persisted across close/reopen within a process so the operator keeps context. */
 let lastSelectedAgentId: string | undefined;
 let lastActivePane: PaneId = "overview";
+
+/**
+ * Process-global IRC traffic buffers, keyed by bus instance. Outlives any
+ * single dashboard open/close cycle so reopening the dashboard (or catching
+ * traffic while it was closed) shows the recent message history. Each bus
+ * gets exactly one long-lived `onSend` subscription that appends to its
+ * buffer; the dashboard reads the buffer, it does not own it. A WeakMap
+ * ensures the buffer is collected when the bus itself is (e.g. tests that
+ * reset the global bus).
+ */
+const ircLogByBus = new WeakMap<IrcBus, IrcLogEntry[]>();
+
+/**
+ * Get (creating on first access) the process-global IRC traffic buffer for
+ * `bus`, registering the single long-lived `onSend` tap that feeds it. The
+ * tap outlives any dashboard open/close cycle, so traffic sent while the
+ * dashboard is closed is captured too. Idempotent: a buffer's existence in
+ * the map doubles as the "tap already registered" guard — same-thread, so
+ * there is no window for double registration. Bounded to
+ * {@link MAX_IRC_LOG_ENTRIES} (oldest dropped first).
+ */
+function ircLogFor(bus: IrcBus): IrcLogEntry[] {
+	let log = ircLogByBus.get(bus);
+	if (!log) {
+		log = [];
+		ircLogByBus.set(bus, log);
+		bus.onSend((message, receipt) => {
+			log!.push({
+				from: message.from,
+				to: message.to,
+				body: message.body,
+				outcome: receipt.outcome,
+				error: receipt.error,
+				ts: message.ts,
+			});
+			if (log!.length > MAX_IRC_LOG_ENTRIES) {
+				log!.splice(0, log!.length - MAX_IRC_LOG_ENTRIES);
+			}
+		});
+	}
+	return log;
+}
 
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
@@ -165,6 +210,16 @@ interface SentReceipt {
 	ts: number;
 }
 
+/** A single IRC message observed by the dashboard (either direction, any endpoint). */
+interface IrcLogEntry {
+	from: string;
+	to: string;
+	body: string;
+	outcome: string;
+	error?: string;
+	ts: number;
+}
+
 export class AgentsDashboard implements Component {
 	readonly #deps: AgentsDashboardDeps;
 	readonly #registry: AgentRegistry;
@@ -184,7 +239,14 @@ export class AgentsDashboard implements Component {
 	#composeTarget: ComposeTarget;
 	#composeEditor: Editor | undefined;
 	#receipts: SentReceipt[] = [];
-
+	/**
+	 * Process-global IRC traffic buffer for this bus (see {@link ircLogFor}),
+	 * assigned once at construction. Holding the array reference directly is
+	 * equivalent to re-resolving it each access: JS arrays are reference
+	 * types, so the tap appends into the same shared instance this points at.
+	 * Survives close/reopen because the buffer is keyed by bus, not instance.
+	 */
+	#ircLog: IrcLogEntry[];
 	#transcriptOverlay: OverlayHandle | undefined;
 	#transcriptViewer: AgentTranscriptViewer | undefined;
 
@@ -201,9 +263,13 @@ export class AgentsDashboard implements Component {
 
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#onDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#onDataChange()));
+		// Process-global buffer (survives close/reopen, captures traffic while
+		// closed). The tap is registered once per bus inside ircLogFor; this
+		// instance only needs a render-only listener for live updates.
+		this.#ircLog = ircLogFor(this.#irc);
+		this.#unsubscribers.push(this.#irc.onSend(() => this.#onDataChange()));
 		this.#ageTimer = setInterval(() => this.#deps.requestRender(), AGE_TICK_MS);
 		this.#ageTimer.unref?.();
-
 		if (!this.#deps.remote) {
 			registerPersistedSubagents(this.#registry, deps.sessionFile);
 		}
@@ -500,6 +566,33 @@ export class AgentsDashboard implements Component {
 			);
 		}
 
+		// Live traffic this agent participated in (in or out). This is the message
+		// history the bus itself never retains; the dashboard buffers it via onSend.
+		const traffic = this.#ircLog.filter(e => e.from === ref.id || e.to === ref.id);
+		if (traffic.length > 0) {
+			lines.push("");
+			lines.push(theme.fg("muted", "Recent traffic"));
+			const shown = traffic.slice(-MAX_IRC_LOG_LINES);
+			for (const entry of shown) {
+				const age = formatAge(Math.max(1, Math.round((Date.now() - entry.ts) / 1000)));
+				const arrow = theme.fg("dim", "→");
+				const fromLabel = entry.from === ref.id ? theme.bold(entry.from) : theme.fg("dim", entry.from);
+				const toLabel = entry.to === ref.id ? theme.bold(entry.to) : theme.fg("dim", entry.to);
+				const outcome =
+					entry.outcome === "failed"
+						? theme.fg("error", entry.error ? `failed — ${entry.error}` : "failed")
+						: theme.fg("dim", entry.outcome);
+				const body = sanitizeLine(entry.body, TRUNCATE_LENGTHS.CONTENT);
+				lines.push(
+					` ${fromLabel} ${arrow} ${toLabel} ${theme.sep.dot} ${outcome} ${theme.fg("dim", `${age} ago`)}`,
+				);
+				lines.push(`   ${body}`);
+			}
+			if (traffic.length > shown.length) {
+				lines.push(theme.fg("dim", `  … ${traffic.length - shown.length} older`));
+			}
+		}
+
 		const mailbox = this.#irc.inbox(ref.id, { peek: true });
 		if (mailbox.length > 0) {
 			lines.push("");
@@ -715,7 +808,6 @@ export class AgentsDashboard implements Component {
 			this.#receipts.splice(0, this.#receipts.length - MAX_RECEIPT_LINES * 2);
 		}
 	}
-
 	#openTranscript(): void {
 		const ref = this.#selectedRef();
 		if (!ref) {

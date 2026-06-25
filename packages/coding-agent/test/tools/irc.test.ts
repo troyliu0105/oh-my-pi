@@ -420,6 +420,57 @@ describe("IRC", () => {
 				expect(sub.delivered.length).toBe(10);
 			});
 		});
+		describe("onSend observer", () => {
+			it("fires once per send with the message and final receipt, including failed outcomes", async () => {
+				const sub = makeFakeSession();
+				registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+				const seen: Array<{ body: string; outcome: string; error?: string }> = [];
+				const unsubscribe = bus.onSend((message, receipt) => {
+					seen.push({ body: message.body, outcome: receipt.outcome, error: receipt.error });
+				});
+
+				// Successful delivery.
+				sub.setOutcome("injected");
+				await bus.send({ from: "0-Main", to: "0-Sub", body: "hello" });
+				// Failed delivery (live hand-off throws → buffered, receipt "failed").
+				sub.setError(new Error("recipient gone"));
+				await bus.send({ from: "0-Main", to: "0-Sub", body: "again" });
+
+				expect(seen).toEqual([
+					{ body: "hello", outcome: "injected" },
+					{ body: "again", outcome: "failed", error: "recipient gone" },
+				]);
+				unsubscribe();
+			});
+
+			it("fires for an unknown recipient (failed outcome is still a terminal dispatch result)", async () => {
+				const seen: IrcMessage[] = [];
+				bus.onSend(message => seen.push(message));
+
+				const receipt = await bus.send({ from: "0-Main", to: "0-Ghost", body: "anyone?" });
+				expect(receipt.outcome).toBe("failed");
+				// Every send that enters dispatch notifies exactly once, including
+				// terminal rejections (unknown/terminated recipient). Observability
+				// covers all dispatch outcomes, not just successful ones.
+				expect(seen).toHaveLength(1);
+				expect(seen[0].to).toBe("0-Ghost");
+			});
+
+			it("unsubscribe stops further notifications", async () => {
+				const sub = makeFakeSession();
+				registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+				const seen: string[] = [];
+				const unsubscribe = bus.onSend(message => seen.push(message.body));
+
+				await bus.send({ from: "0-Main", to: "0-Sub", body: "one" });
+				unsubscribe();
+				await bus.send({ from: "0-Main", to: "0-Sub", body: "two" });
+
+				expect(seen).toEqual(["one"]);
+			});
+		});
 	});
 
 	describe("IrcTool", () => {

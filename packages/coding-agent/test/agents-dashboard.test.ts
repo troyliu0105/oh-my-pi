@@ -3,6 +3,7 @@
  * - roster renders runtime refs, displayName, status, and activity gist
  * - IRC pane peeks pending mail without draining the mailbox
  * - direct compose sends through IrcBus and records the receipt
+ * - IRC pane renders live traffic history observed via onSend (in or out)
  * - advisor rows are read-only for IRC sends
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
@@ -172,6 +173,98 @@ describe("AgentsDashboard", () => {
 		expect(out).toContain("Worker");
 		expect(out).toContain("injected");
 		dashboard.dispose();
+	});
+
+	it("IRC pane renders live traffic for an agent that is either endpoint", async () => {
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			sessionFile: null,
+		});
+		const workerCapture: FakeSessionCapture = { delivered: [] };
+		const peerCapture: FakeSessionCapture = { delivered: [] };
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: makeFakeSession(workerCapture, "inject"),
+			sessionFile: null,
+			status: "running",
+		});
+		registry.register({
+			id: "Peer",
+			displayName: "Peer",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: makeFakeSession(peerCapture, "inject"),
+			sessionFile: null,
+			status: "running",
+		});
+		const irc = new IrcBus(registry);
+		const dashboard = makeDashboard({ registry, irc });
+
+		// main → Worker: Worker is the recipient endpoint.
+		await irc.send({ from: MAIN_AGENT_ID, to: "Worker", body: "please review the diff" });
+		// Worker → Peer: neither endpoint is Main, exercises the cross-agent path.
+		await irc.send({ from: "Worker", to: "Peer", body: "handoff note" });
+
+		dashboard.handleInput("right"); // IRC pane (Worker is the default selection at index 0)
+
+		const out = stripped(dashboard);
+		// Both legs touching Worker appear under "Recent traffic".
+		expect(out).toContain("Recent traffic");
+		expect(out).toContain("Main → Worker");
+		expect(out).toContain("please review the diff");
+		expect(out).toContain("Worker → Peer");
+		expect(out).toContain("handoff note");
+		// The inbound leg surfaces the delivery outcome.
+		expect(out).toContain("injected");
+		dashboard.dispose();
+	});
+
+	it("IRC traffic survives dashboard close/reopen and is captured while closed", async () => {
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			sessionFile: null,
+		});
+		const workerCapture: FakeSessionCapture = { delivered: [] };
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: makeFakeSession(workerCapture, "inject"),
+			sessionFile: null,
+			status: "running",
+		});
+		const irc = new IrcBus(registry);
+
+		// First open: send a message, observe it, then close the dashboard.
+		const first = makeDashboard({ registry, irc });
+		await irc.send({ from: MAIN_AGENT_ID, to: "Worker", body: "before close" });
+		first.handleInput("right");
+		expect(stripped(first)).toContain("before close");
+		first.dispose();
+
+		// Traffic while the dashboard is closed must still be captured.
+		await irc.send({ from: MAIN_AGENT_ID, to: "Worker", body: "while closed" });
+
+		// Reopen on the same bus: both the pre-close and while-closed messages
+		// must be visible without any re-send.
+		const reopened = makeDashboard({ registry, irc });
+		reopened.handleInput("right");
+		const out = stripped(reopened);
+		expect(out).toContain("before close");
+		expect(out).toContain("while closed");
+		reopened.dispose();
 	});
 
 	it("advisor rows are read-only for IRC sends", () => {

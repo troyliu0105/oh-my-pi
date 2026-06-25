@@ -152,7 +152,11 @@ export function isOpaqueStatusBody(message: string): boolean {
 	// `/[a-z\d]{3,}/` check misclassified these as opaque, wrongly forcing a
 	// 429 into the account-rotation (UsageLimit) path. Any non-ASCII script
 	// run makes the body informative.
-	if (/[\p{Script=Cyrillic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Thai}]/u.test(cleaned)) {
+	if (
+		/[\p{Script=Cyrillic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Thai}]/u.test(
+			cleaned,
+		)
+	) {
 		return false;
 	}
 	return !/[a-z\d]{3,}/i.test(cleaned);
