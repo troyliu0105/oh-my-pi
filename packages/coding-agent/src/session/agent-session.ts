@@ -3272,6 +3272,25 @@ export class AgentSession {
 					this.#retryAttempt = 0;
 					this.#retryModelAttempt = 0;
 				}
+				// When a retried turn succeeds but produces an empty/thinking-only
+				// stop, the budget is preserved (49e029b33) so a subsequent
+				// transient error in the empty-stop retry chain shares the
+				// remaining attempts. But the retry lifecycle promise MUST
+				// resolve so isRetrying clears and waitForPostPromptRecovery
+				// completes — otherwise the retry loader and isRetrying stay
+				// stranded while #handleEmptyAssistantStop runs its own loop.
+				// #handleEmptyAssistantStop returns early from agent_end, so
+				// the #resolveRetry() at the bottom of agent_end is never
+				// reached for this turn.
+				if (
+					assistantMsg.stopReason !== "error" &&
+					assistantMsg.stopReason !== "aborted" &&
+					this.#isEmptyAssistantStop(assistantMsg) &&
+					this.#retryAttempt > 0 &&
+					this.#retryPromise
+				) {
+					this.#resolveRetry();
+				}
 				if (assistantMsg.provider === "opencode-go") {
 					this.#modelRegistry.authStorage.recordUsageCost(assistantMsg.provider, assistantMsg.usage.cost.total, {
 						sessionId: this.#activeProviderSessionId(),
@@ -9754,11 +9773,14 @@ export class AgentSession {
 				provider: assistantMessage.provider,
 			});
 			if (this.#retryAttempt > 0) {
+				// The retried turn's transient error (429/5xx) was overcome —
+				// the model is responding, just with empty/thinking-only
+				// output. Emit success so the retry lifecycle closes cleanly
+				// instead of surfacing a misleading "Retry failed" banner.
 				await this.#emitSessionEvent({
 					type: "auto_retry_end",
-					success: false,
+					success: true,
 					attempt: this.#retryAttempt,
-					finalError: "Assistant returned empty stop after retry cap",
 				});
 				this.#retryModelAttempt = 0;
 				this.#retryAttempt = 0;

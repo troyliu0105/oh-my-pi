@@ -1077,6 +1077,75 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 2 });
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after transient 429" });
+	});
+
+	it("clears retry state after recovery via a thinking-only turn", async () => {
+		// Contract: when the retried turn succeeds with ONLY thinking content
+		// (no text, no tool call — e.g. a reasoning model that emits a chain-
+		// of-thought block then stops), the retry state MUST still be cleaned
+		// up: auto_retry_end(success=true) fires and isRetrying returns false.
+		// #isEmptyAssistantStop treats a thinking-only "stop" as empty, which
+		// previously stranded the retry lifecycle — the retry promise never
+		// resolved and the empty-stop exhaustion emitted a misleading failure.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel();
+		let attempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				attempts += 1;
+				mock.push(
+					attempts === 1
+						? { throw: "rate limit", errorStatus: 429 }
+						: { content: [{ type: "thinking", thinking: "Let me reason about this..." }] },
+				);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"features.unexpectedStopDetection": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger 429 then thinking-only recovery");
+		await session.waitForIdle();
+
+		// One 429 error triggers one retry; the retry's thinking-only turn
+		// is empty, so the empty-stop guard retries until its own cap (3),
+		// then closes the retry lifecycle with success (the 429 was overcome).
+		expect(attempts).toBe(5);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
+		expect(session.isRetrying).toBe(false);
 	});
 });

@@ -300,14 +300,13 @@ describe("AgentSession empty stop guard", () => {
 		expect(session.retryAttempt).toBe(0);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0]?.attempt).toBe(1);
-		expect(retryEndEvents.filter(event => event.success)).toEqual([]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({
 			type: "auto_retry_end",
-			success: false,
+			success: true,
 			attempt: 1,
 		});
-		expect(retryEndEvents[0]?.finalError).toContain("empty stop");
+		expect(retryEndEvents[0]?.finalError).toBeUndefined();
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(3);
 		expect(emptyAssistantStops(session.agent.state.messages)).toHaveLength(1);
 
