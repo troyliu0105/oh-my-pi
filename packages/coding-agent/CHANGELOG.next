@@ -1,0 +1,18 @@
+# Fork-local changelog (next release)
+#
+# Entries here are specific to this fork and intentionally kept OUT of CHANGELOG.md
+# to avoid rebase conflicts against upstream. At release time, `scripts/merge-changelog-next.ts`
+# concatenates these sections into CHANGELOG.md under ## [Unreleased], then clears this file.
+#
+# Keep the same section format as CHANGELOG.md (### Added / ### Changed / ### Fixed / ### Removed).
+
+### Added
+
+- Added `/agents-dashboard`, a fullscreen live subagent dashboard showing runtime agent status, progress, unread IRC mailbox previews, and direct IRC send controls.
+- The Agents Dashboard IRC pane now renders a live traffic history: every message sent through the bus (agent↔agent, main→agent, or agent→agent) appears as a `from → to · outcome · body` line under "Recent traffic", filtered to the selected agent. The buffer is process-global and keyed by bus instance (200 entries), so it survives close/reopen and captures traffic that occurred while the dashboard was closed. Previously the IRC pane showed only failed-delivery mail and sends composed from within the dashboard, so normal IRC traffic was invisible there. The bus stays a stateless transport: a new passive `IrcBus.onSend` observer notifies once per send with the final receipt, and a long-lived tap (registered once per bus) feeds the shared dashboard buffer.
+
+### Fixed
+
+- Fixed the interactive input editor drifting above the terminal bottom when the rendered conversation was shorter than the viewport; the TUI now bottom-aligns short frames so the editor's bottom border stays on the terminal's last row until the transcript overflows.
+- Fixed auto-retry not triggering for HTTP 429/408/5xx errors whose response body carries a locale-specific message with no English keywords or status digits (e.g. Z.AI/Zhipu GLM `{"error":{"code":"1305","message":"该模型当前访问量过大，请您稍后再试"}}`). The session retry classifier now checks the structured `errorStatus` field on the assistant message in addition to regex-matching the error message text, so transient HTTP errors are retried regardless of the response body language. Retry fallback chains now spend the configured retry budget on the current model before switching to the next fallback model, then reset that budget for the newly selected model. The same fix was applied to the auto-compaction summarization retry path.
+- Fixed two subagents entering an infinite IRC ping-pong loop where each idle wake turn replies to the other's reply ("Confirmed." ↔ "Confirmed." bouncing forever). The `IrcBus` now tracks identical `(from, to, body)` triples within a 60-second sliding window and blocks delivery after 3 repeats (configurable via the new `irc.loopGuard` setting, 0 disables), returning a `failed` receipt whose error text tells the agent the loop was detected. The IRC etiquette prompt also now instructs agents to never send bare acknowledgements — silence is the correct response when no action or answer is needed.

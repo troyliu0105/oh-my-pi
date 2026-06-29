@@ -256,3 +256,27 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+## Fork Rebase Strategy
+
+This repo is a long-lived fork (`next` branch) rebased onto upstream `can1357/oh-my-pi`. The following conventions minimize rebase conflicts.
+
+### Layering
+
+Prefer **new files** over editing hot upstream files. Hot files (upstream churns frequently):
+- `packages/coding-agent/src/session/agent-session.ts`
+- `packages/coding-agent/src/modes/interactive-mode.ts`
+- `packages/tui/src/components/editor.ts`
+- `packages/coding-agent/src/modes/controllers/selector-controller.ts`
+
+When adding a feature, put the implementation in a new file and wire it in with a minimal additive change (one import + one call). The `agents-dashboard.ts` feature (884 lines) is the model: zero conflict because it lives entirely in a new file.
+
+When you **must** touch a hot file, keep the diff additive and vertical: add fields, methods, and call sites — never delete or reorder existing lines. Additions are merge-friendly; deletions and reordering conflict worst.
+
+### CHANGELOG.next
+
+Fork-local changelog entries go in `packages/*/CHANGELOG.next`, **not** `CHANGELOG.md`. At release time, `scripts/merge-changelog-next.ts` (called by `updateChangelogsForRelease`) merges them into `CHANGELOG.md` `[Unreleased]` and clears the `.next` file. This eliminates the most common mechanical conflict — upstream touches CHANGELOGs far more than any source file.
+
+### git rerere
+
+`rerere.enabled` and `rerere.autoupdate` are set globally. Git records conflict resolutions and auto-applies them on repeat conflicts. No action needed — if you manually resolve a conflict during rebase, the resolution is saved automatically.

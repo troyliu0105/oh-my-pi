@@ -10,6 +10,7 @@
  */
 import { $, Glob } from "bun";
 import { runChangelogFixer } from "./fix-changelogs";
+import { mergeChangelogNext } from "./merge-changelog-next";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
@@ -134,6 +135,10 @@ function removeEmptyVersionEntries(content: string): string {
 }
 
 async function updateChangelogsForRelease(version: string): Promise<void> {
+	const { merged: mergedNext } = await mergeChangelogNext();
+	if (mergedNext.length > 0) {
+		console.log(`Merged ${mergedNext.length} CHANGELOG.next file(s) into [Unreleased].`);
+	}
 	const date = new Date().toISOString().split("T")[0];
 
 	for await (const changelog of changelogGlob.scan(".")) {
